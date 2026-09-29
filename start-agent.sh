@@ -23,6 +23,10 @@ export DSLR_AGENT_HOST="${DSLR_AGENT_HOST:-0.0.0.0}"
 # Port (opsional, default 3100)
 export DSLR_AGENT_PORT="${DSLR_AGENT_PORT:-3100}"
 
+if [ -z "${PRINT_AGENT_SECRET:-}" ]; then
+  echo "[start-agent] WARNING: PRINT_AGENT_SECRET belum diisi. Automatic printing akan ditolak." >&2
+fi
+
 # ── Lokasi script agent ─────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 AGENT_SCRIPT="${SCRIPT_DIR}/index.mjs"

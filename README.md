@@ -1,6 +1,6 @@
-# Memoreen Camera Agent
+# Memoreen Camera & Print Agent
 
-Agent lokal untuk menghubungkan kamera DSLR ke aplikasi Memoreen melalui USB dan `gphoto2`.
+Agent lokal untuk menghubungkan kamera DSLR dan printer kiosk ke aplikasi Memoreen.
 
 ## Prasyarat
 
@@ -32,6 +32,7 @@ Launcher menggunakan konfigurasi berikut secara default:
 DSLR_AGENT_HOST=0.0.0.0
 DSLR_AGENT_PORT=3100
 DSLR_AGENT_ALLOWED_ORIGINS=https://memoreen.id,https://www.memoreen.id
+PRINT_AGENT_SECRET=rahasia-yang-sama-dengan-server-minimal-24-karakter
 ```
 
 Nilai dapat diganti melalui environment variable. Contoh:
@@ -39,6 +40,21 @@ Nilai dapat diganti melalui environment variable. Contoh:
 ```bash
 DSLR_AGENT_ALLOWED_ORIGINS="https://memoreen.id,https://www.memoreen.id" ./start-agent.sh
 ```
+
+`PRINT_AGENT_SECRET` wajib sama persis dengan environment variable pada server Next.js.
+Gunakan nilai acak minimal 24 karakter dan jangan menaruhnya di pengaturan admin atau browser.
+Tanpa secret ini endpoint `/print` akan menolak semua job.
+
+## Printer
+
+- Windows menggunakan driver printer yang sudah terpasang melalui `System.Drawing.Printing`.
+- Linux/macOS menggunakan CUPS dan perintah `lp`.
+- Nama printer, ukuran kertas, borderless, dan URL agent diatur dari **Admin → Settings → Printer**.
+- Kosongkan nama printer untuk menggunakan default printer sistem.
+- Lakukan test driver secara langsung dari sistem operasi sebelum menggunakan kiosk.
+
+Agent hanya menerima print job bertanda tangan dari server. Token berlaku 90 detik,
+mengikat jumlah copy dan gambar tertentu, serta tidak dapat dipakai ulang pada proses agent yang sama.
 
 Jika agent dijalankan dari komputer terpisah, pastikan firewall mengizinkan port `3100` dan gunakan alamat IP komputer agent pada pengaturan kamera Memoreen.
 

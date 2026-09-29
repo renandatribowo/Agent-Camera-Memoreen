@@ -7,9 +7,92 @@ import { writeFile, unlink, readFile, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 
 const PORT = Number(process.env.DSLR_AGENT_PORT || 3100);
 const HOST = process.env.DSLR_AGENT_HOST || '127.0.0.1';
+const PRINT_AGENT_SECRET = process.env.PRINT_AGENT_SECRET || '';
+const activePrintOrders = new Set();
+const completedPrintOrders = new Set();
+
+function verifyPrintToken(token) {
+  if (PRINT_AGENT_SECRET.length < 24) throw new Error('PRINT_AGENT_SECRET belum dikonfigurasi pada agent');
+  const [encoded, suppliedSignature, extra] = String(token || '').split('.');
+  if (!encoded || !suppliedSignature || extra) throw new Error('Otorisasi print tidak valid');
+  const expected = createHmac('sha256', PRINT_AGENT_SECRET).update(encoded).digest();
+  let supplied;
+  try { supplied = Buffer.from(suppliedSignature, 'base64url'); } catch { throw new Error('Otorisasi print tidak valid'); }
+  if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) {
+    throw new Error('Otorisasi print tidak valid');
+  }
+  const payload = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'));
+  if (payload.version !== 1 || !payload.orderId || !payload.imageUrl) throw new Error('Print job tidak lengkap');
+  if (!Number.isInteger(payload.copies) || payload.copies < 1 || payload.copies > 50) throw new Error('Jumlah copy tidak valid');
+  if (!Number.isFinite(payload.exp) || payload.exp < Math.floor(Date.now() / 1000)) throw new Error('Otorisasi print kedaluwarsa');
+  if (!/^https:\/\//i.test(payload.imageUrl)) throw new Error('Sumber gambar print harus menggunakan HTTPS');
+  return payload;
+}
+
+function runProcess(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, { ...options, windowsHide: true });
+    let stderr = '';
+    child.stderr?.on('data', (chunk) => { stderr += chunk.toString(); });
+    child.on('error', reject);
+    child.on('close', (code) => code === 0 ? resolve() : reject(new Error(stderr.trim() || `${command} exited with code ${code}`)));
+  });
+}
+
+async function downloadPrintImage(imageUrl, filepath) {
+  const response = await fetch(imageUrl, { signal: AbortSignal.timeout(30000) });
+  if (!response.ok) throw new Error(`Gagal mengunduh photo strip (${response.status})`);
+  const contentType = response.headers.get('content-type') || '';
+  if (!contentType.startsWith('image/')) throw new Error('File print bukan gambar');
+  const buffer = Buffer.from(await response.arrayBuffer());
+  if (!buffer.length || buffer.length > 25 * 1024 * 1024) throw new Error('Ukuran file print tidak valid');
+  await writeFile(filepath, buffer);
+}
+
+async function printImage(job, filepath) {
+  const width = Number(job.paperWidthMm) || 101.6;
+  const height = Number(job.paperHeightMm) || 152.4;
+  if (width < 20 || width > 500 || height < 20 || height > 500) throw new Error('Ukuran kertas tidak valid');
+
+  if (process.platform === 'win32') {
+    const script = [
+      'Add-Type -AssemblyName System.Drawing',
+      '$doc = New-Object System.Drawing.Printing.PrintDocument',
+      '$doc.PrintController = New-Object System.Drawing.Printing.StandardPrintController',
+      'if ($env:MEMOREEN_PRINTER) { $doc.PrinterSettings.PrinterName = $env:MEMOREEN_PRINTER }',
+      'if (-not $doc.PrinterSettings.IsValid) { throw "Printer tidak ditemukan" }',
+      '$doc.PrinterSettings.Copies = [int16]$env:MEMOREEN_COPIES',
+      '$paper = New-Object System.Drawing.Printing.PaperSize("Memoreen", [int]([double]$env:MEMOREEN_WIDTH_MM / 25.4 * 100), [int]([double]$env:MEMOREEN_HEIGHT_MM / 25.4 * 100))',
+      '$doc.DefaultPageSettings.PaperSize = $paper',
+      '$doc.DefaultPageSettings.Margins = New-Object System.Drawing.Printing.Margins(0,0,0,0)',
+      '$image = [System.Drawing.Image]::FromFile($env:MEMOREEN_PRINT_FILE)',
+      '$doc.add_PrintPage({ param($sender,$e) $e.Graphics.DrawImage($image, $e.PageBounds); $e.HasMorePages = $false })',
+      'try { $doc.Print() } finally { $image.Dispose(); $doc.Dispose() }',
+    ].join('; ');
+    await runProcess('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      env: {
+        ...process.env,
+        MEMOREEN_PRINT_FILE: filepath,
+        MEMOREEN_PRINTER: String(job.printerName || ''),
+        MEMOREEN_COPIES: String(job.copies),
+        MEMOREEN_WIDTH_MM: String(width),
+        MEMOREEN_HEIGHT_MM: String(height),
+      },
+    });
+    return;
+  }
+
+  const args = [];
+  if (job.printerName) args.push('-d', String(job.printerName));
+  args.push('-n', String(job.copies), '-o', `media=Custom.${width}x${height}mm`, '-o', 'fit-to-page');
+  if (job.borderless) args.push('-o', 'page-border=none');
+  args.push(filepath);
+  await runProcess('lp', args);
+}
 
 // Only browser pages served from these origins are allowed to talk to the
 // agent via CORS. Without this, any website open in the same browser could
@@ -222,6 +305,7 @@ const server = http.createServer(async (req, res) => {
         cameras: detectCameras(),
         liveView: !!liveViewProcess,
         version: '1.0.0',
+        printing: { available: PRINT_AGENT_SECRET.length >= 24, platform: process.platform },
       }, allowedOrigin);
     }
 
@@ -287,6 +371,29 @@ const server = http.createServer(async (req, res) => {
         image: `data:image/jpeg;base64,${base64}`,
         filename: path.basename(filepath),
       }, allowedOrigin);
+    }
+
+    if (req.method === 'POST' && pathname === '/print') {
+      const raw = await readBody(req);
+      let body;
+      try { body = JSON.parse(raw || '{}'); } catch { return json(res, 400, { success: false, error: 'JSON tidak valid' }, allowedOrigin); }
+      const job = verifyPrintToken(body.token);
+      if (completedPrintOrders.has(job.orderId) || activePrintOrders.has(job.orderId)) {
+        return json(res, 409, { success: false, error: 'Order print sudah pernah diproses' }, allowedOrigin);
+      }
+      activePrintOrders.add(job.orderId);
+      const outputDir = path.join(os.tmpdir(), 'photobooth-print-agent');
+      await mkdir(outputDir, { recursive: true });
+      const filepath = path.join(outputDir, `${String(job.orderId).replace(/[^A-Za-z0-9_-]/g, '')}.img`);
+      try {
+        await downloadPrintImage(job.imageUrl, filepath);
+        await printImage(job, filepath);
+        completedPrintOrders.add(job.orderId);
+        return json(res, 200, { success: true, orderId: job.orderId, copies: job.copies }, allowedOrigin);
+      } finally {
+        activePrintOrders.delete(job.orderId);
+        unlink(filepath).catch(() => {});
+      }
     }
 
     return json(res, 404, { success: false, error: 'Not found' }, allowedOrigin);

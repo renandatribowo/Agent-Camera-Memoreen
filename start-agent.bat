@@ -22,6 +22,10 @@ if "%DSLR_AGENT_HOST%"=="" set DSLR_AGENT_HOST=0.0.0.0
 REM Port (opsional, default 3100)
 if "%DSLR_AGENT_PORT%"=="" set DSLR_AGENT_PORT=3100
 
+if "%PRINT_AGENT_SECRET%"=="" (
+  echo [start-agent] WARNING: PRINT_AGENT_SECRET belum diisi. Automatic printing akan ditolak.
+)
+
 set SCRIPT_DIR=%~dp0
 set AGENT_SCRIPT=%SCRIPT_DIR%index.mjs
 
