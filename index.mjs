@@ -4,6 +4,7 @@ import http from 'node:http';
 import { createFocusController } from './focus.mjs';
 import { createJpegParser } from './jpeg-parser.mjs';
 import { captureWithPausedLiveView } from './capture-lifecycle.mjs';
+import { downloadPrintImage } from './print-image.mjs';
 import { execSync, spawn } from 'node:child_process';
 import { writeFile, unlink, readFile, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -43,16 +44,6 @@ function runProcess(command, args, options = {}) {
     child.on('error', reject);
     child.on('close', (code) => code === 0 ? resolve() : reject(new Error(stderr.trim() || `${command} exited with code ${code}`)));
   });
-}
-
-async function downloadPrintImage(imageUrl, filepath) {
-  const response = await fetch(imageUrl, { signal: AbortSignal.timeout(30000) });
-  if (!response.ok) throw new Error(`Gagal mengunduh photo strip (${response.status})`);
-  const contentType = response.headers.get('content-type') || '';
-  if (!contentType.startsWith('image/')) throw new Error('File print bukan gambar');
-  const buffer = Buffer.from(await response.arrayBuffer());
-  if (!buffer.length || buffer.length > 25 * 1024 * 1024) throw new Error('Ukuran file print tidak valid');
-  await writeFile(filepath, buffer);
 }
 
 async function printImage(job, filepath) {
