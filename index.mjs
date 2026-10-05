@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 
 import http from 'node:http';
+import { createFocusController } from './focus.mjs';
+import { createJpegParser } from './jpeg-parser.mjs';
 import { captureWithPausedLiveView } from './capture-lifecycle.mjs';
 import { execSync, spawn } from 'node:child_process';
 import { writeFile, unlink, readFile, mkdir } from 'node:fs/promises';
@@ -156,10 +158,17 @@ function detectCameras() {
 
 let liveViewProcess = null;
 let latestPreview = null;
+let previewSequence = 0;
+let previewTime = 0;
 let captureInProgress = false;
+let liveViewWanted = false;
+const focusController = createFocusController({
+  stop: stopLiveView,
+  resume: () => { if (liveViewWanted && !captureInProgress) startLiveView(true); },
+});
 
-function startLiveView() {
-  if (captureInProgress) return false;
+function startLiveView(resumingFocus = false) {
+  if (captureInProgress || (focusController.busy && !resumingFocus)) return false;
   if (!isGphoto2Available()) return false;
   if (liveViewProcess) return true;
 
@@ -168,25 +177,20 @@ function startLiveView() {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
-    const chunks = [];
-    liveViewProcess.stdout.on('data', (chunk) => {
-      chunks.push(chunk);
-      const total = chunks.reduce((s, c) => s + c.length, 0);
-      if (total > 500000) {
-        const all = Buffer.concat(chunks);
-        const sofi = all.indexOf(Buffer.from([0xff, 0xd8]));
-        const eoi = all.lastIndexOf(Buffer.from([0xff, 0xd9]));
-        if (sofi >= 0 && eoi > sofi) {
-          latestPreview = all.subarray(sofi, eoi + 2);
-        }
-        chunks.length = 0;
+    const process = liveViewProcess;
+    process.stdout.on('data', createJpegParser(frame => {
+      latestPreview = frame;
+      previewSequence++;
+      previewTime = Date.now();
+    }));
+    const clear = () => {
+      if (liveViewProcess === process) {
+        liveViewProcess = null;
+        latestPreview = null;
       }
-    });
-
-    liveViewProcess.on('exit', () => {
-      liveViewProcess = null;
-      latestPreview = null;
-    });
+    };
+    process.on('exit', clear);
+    process.on('error', clear);
 
     return true;
   } catch {
@@ -254,9 +258,10 @@ function json(res, status, data, allowedOrigin) {
   res.end(body);
 }
 
-function image(res, status, buffer, allowedOrigin) {
+function image(res, status, buffer, allowedOrigin, sequence) {
   const headers = {
     'Content-Type': 'image/jpeg',
+    ...(sequence === undefined ? {} : { 'X-Preview-Sequence': String(sequence), 'Access-Control-Expose-Headers': 'X-Preview-Sequence' }),
     'Cache-Control': 'no-store, no-cache, must-revalidate',
   };
   if (allowedOrigin) headers['Access-Control-Allow-Origin'] = allowedOrigin;
@@ -302,7 +307,7 @@ const server = http.createServer(async (req, res) => {
         ok: true,
         service: 'dslr-agent',
         gphoto2: isGphoto2Available(),
-        cameras: detectCameras(),
+        cameras: focusController.busy || captureInProgress || liveViewProcess ? [] : detectCameras(),
         liveView: !!liveViewProcess,
         version: '1.0.0',
         printing: { available: PRINT_AGENT_SECRET.length >= 24, platform: process.platform },
@@ -311,11 +316,12 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'GET' && pathname === '/detect') {
       const available = isGphoto2Available();
-      const cameras = available ? detectCameras() : [];
+      const cameras = available && !focusController.busy && !captureInProgress && !liveViewProcess ? detectCameras() : [];
       return json(res, 200, { available, cameras, count: cameras.length }, allowedOrigin);
     }
 
     if (req.method === 'POST' && pathname === '/liveview/start') {
+      liveViewWanted = true;
       if (!isGphoto2Available()) {
         return json(res, 500, { success: false, error: 'gPhoto2 tidak tersedia' }, allowedOrigin);
       }
@@ -325,18 +331,20 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && pathname === '/liveview/frame') {
-      if (!latestPreview || latestPreview.length === 0) {
+      if (!latestPreview || latestPreview.length === 0 || Date.now() - previewTime > 1500) {
         return json(res, 200, { available: true, error: 'No frame available' }, allowedOrigin);
       }
-      return image(res, 200, latestPreview, allowedOrigin);
+      return image(res, 200, latestPreview, allowedOrigin, previewSequence);
     }
 
     if (req.method === 'POST' && pathname === '/liveview/stop') {
+      liveViewWanted = false;
       await stopLiveView();
       return json(res, 200, { success: true, message: 'Live view stopped' }, allowedOrigin);
     }
 
     if (req.method === 'GET' && pathname === '/preview') {
+      if (focusController.busy || captureInProgress) return json(res, 409, { success: false, error: 'Kamera sedang digunakan' }, allowedOrigin);
       if (!isGphoto2Available()) {
         return json(res, 200, { available: false, error: 'gPhoto2 tidak tersedia' }, allowedOrigin);
       }
@@ -347,18 +355,25 @@ const server = http.createServer(async (req, res) => {
       return image(res, 200, buffer, allowedOrigin);
     }
 
+    if (req.method === 'POST' && pathname === '/focus') {
+      if (captureInProgress || !liveViewWanted) return json(res, 409, { success: false, code: 'busy' }, allowedOrigin);
+      const result = await focusController.focus();
+      return json(res, result.success ? 200 : result.code === 'failed' ? 503 : 409, result, allowedOrigin);
+    }
+
     if (req.method === 'POST' && pathname === '/capture') {
+      if (focusController.busy) return json(res, 409, { success: false, error: 'Kamera sedang fokus' }, allowedOrigin);
       const outputDir = path.join(os.tmpdir(), 'photobooth-dslr-agent');
-      await mkdir(outputDir, { recursive: true });
       if (captureInProgress) return json(res, 409, { success: false, error: 'Capture sedang berlangsung' }, allowedOrigin);
       captureInProgress = true;
       let filepath;
       try {
+        await mkdir(outputDir, { recursive: true });
         filepath = await captureWithPausedLiveView({
           isLive: () => !!liveViewProcess,
           stop: stopLiveView,
           capture: () => capturePhoto(outputDir),
-          start: () => { captureInProgress = false; startLiveView(); },
+          start: () => { captureInProgress = false; if (liveViewWanted) startLiveView(); },
         });
       } finally {
         captureInProgress = false;

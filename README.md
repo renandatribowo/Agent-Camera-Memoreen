@@ -75,3 +75,30 @@ Gunakan `start-agent.sh` atau `start-agent.bat` sebagai program yang dijalankan 
 ## Catatan kamera
 
 Capture diarahkan ke internal RAM kamera melalui `gphoto2`. Kamera tetap harus mendukung mode capture tanpa memory card; dukungan ini bergantung pada model dan firmware kamera.
+
+## Automatic preview focus
+
+Restart the agent after updating it. `/camera` analyzes faces locally using the
+bundled MediaPipe detector. After a face remains stable for one second, it asks
+`POST /focus` to run one autofocus cycle. It then measures a fresh face-sharpness
+baseline. A sustained drop below 55% of that baseline for one second can request
+another cycle, after movement settles and a five-second cooldown has elapsed.
+Sampling pauses during countdown, capture, review, and live-photo recording.
+The shutter waits for an already-running focus request before starting countdown.
+
+For Canon 550D: set the lens to AF and use Live Mode or Face Detection Live Mode.
+The browser's face coordinates are NOT sent to the camera: the camera's AF area
+still decides the optical focus target. Face Detection Live Mode is useful when
+people stand away from the center. Verify this on the actual body/lens first.
+Live view briefly pauses while USB is handed to the focus command. A successful
+command means the camera accepted the operation, not proof of optical focus lock.
+
+The agent serializes focus and capture, allows only fixed gphoto2 arguments, and
+applies the existing origin allowlist. Failures back off for 15 seconds; after two
+failures the browser disables automatic preview focus for that page session.
+An old agent, the same-origin legacy DSLR backend, or a detector load failure
+shows an unavailable notice; normal photo capture remains available.
+
+Very blurred/occluded/small faces may not be detected. Lighting, group composition,
+and camera AF point selection can affect results. Thresholds require a real-camera
+check; software tests use a simulated agent, not a physical Canon body.
