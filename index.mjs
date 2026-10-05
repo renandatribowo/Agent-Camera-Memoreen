@@ -5,6 +5,7 @@ import { createFocusController } from './focus.mjs';
 import { createJpegParser } from './jpeg-parser.mjs';
 import { captureWithPausedLiveView } from './capture-lifecycle.mjs';
 import { downloadPrintImage } from './print-image.mjs';
+import { choosePrinterName } from './print-destination.mjs';
 import { execSync, spawn } from 'node:child_process';
 import { writeFile, unlink, readFile, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
@@ -80,7 +81,8 @@ async function printImage(job, filepath) {
   }
 
   const args = [];
-  if (job.printerName) args.push('-d', String(job.printerName));
+  const printerName = choosePrinterName(job.printerName);
+  if (printerName) args.push('-d', printerName);
   args.push('-n', String(job.copies), '-o', `media=Custom.${width}x${height}mm`, '-o', 'fit-to-page');
   if (job.borderless) args.push('-o', 'page-border=none');
   args.push(filepath);
