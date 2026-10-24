@@ -79,10 +79,12 @@ Capture diarahkan ke internal RAM kamera melalui `gphoto2`. Kamera tetap harus m
 ## Automatic preview focus
 
 Restart the agent after updating it. `/camera` analyzes faces locally using the
-bundled MediaPipe detector. After a face remains stable for one second, it asks
-`POST /focus` to run one autofocus cycle. It then measures a fresh face-sharpness
-baseline. A sustained drop below 55% of that baseline for one second can request
-another cycle, after movement settles and a five-second cooldown has elapsed.
+bundled MediaPipe detector, sampling at most every 250 ms. A missing face requests
+focus immediately, subject to the pending-operation guard and cooldown. A stable
+face can request initial focus after 250 ms. After calibration, a sharpness drop
+below 70% of the baseline requests refocus without the previous one-second wait.
+The cooldown after success is two seconds; after failure it is five seconds.
+A continuously empty scene can therefore cause repeated autofocus cycles.
 Sampling pauses during countdown, capture, review, and live-photo recording.
 The shutter waits for an already-running focus request before starting countdown.
 
@@ -94,7 +96,7 @@ Live view briefly pauses while USB is handed to the focus command. A successful
 command means the camera accepted the operation, not proof of optical focus lock.
 
 The agent serializes focus and capture, allows only fixed gphoto2 arguments, and
-applies the existing origin allowlist. Failures back off for 15 seconds; after two
+applies the existing origin allowlist. Failures back off for five seconds; after two
 failures the browser disables automatic preview focus for that page session.
 An old agent, the same-origin legacy DSLR backend, or a detector load failure
 shows an unavailable notice; normal photo capture remains available.
@@ -102,3 +104,20 @@ shows an unavailable notice; normal photo capture remains available.
 Very blurred/occluded/small faces may not be detected. Lighting, group composition,
 and camera AF point selection can affect results. Thresholds require a real-camera
 check; software tests use a simulated agent, not a physical Canon body.
+
+## Capture readiness
+
+Before taking a photo, the agent waits for live view to release USB, settles for
+750 ms, and reads `capturetarget` to check communication. This read-only probe
+retries only camera/device-busy errors, up to three attempts with 1- and 2-second
+backoff. The shutter command is never automatically retried, preventing duplicate
+shots when a transfer fails after exposure. After capture (including failures),
+the agent waits 750 ms before resuming live view. Separate preview requests are
+blocked while live view or capture owns the camera. Original capture errors are
+logged in the agent terminal. A successful probe does not prove buffers are empty.
+
+Update all agent files, including the new `camera-ready.mjs`, then restart the
+agent. The more responsive face/blur triggers also require the updated Memoreen
+web application.
+
+Run software checks without a camera using `node --test tests/*.test.mjs`.

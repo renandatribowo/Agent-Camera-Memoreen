@@ -35,7 +35,7 @@ export function createFocusController({ stop, resume, run = runAutofocus }) {
         // Failure is not evidence that focus was achieved. The UI must back off.
       } finally {
         try { await resume(); } catch { success = false; }
-        nextAllowed = Date.now() + (success ? 5000 : 15000);
+        nextAllowed = Date.now() + (success ? 2000 : 5000);
         busy = false;
       }
       return { success, code: success ? 'ok' : 'failed' };

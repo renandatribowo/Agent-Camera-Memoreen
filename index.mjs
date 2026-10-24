@@ -3,6 +3,7 @@
 import http from 'node:http';
 import { createFocusController } from './focus.mjs';
 import { createJpegParser } from './jpeg-parser.mjs';
+import { waitForCameraReady } from './camera-ready.mjs';
 import { captureWithPausedLiveView } from './capture-lifecycle.mjs';
 import { downloadPrintImage } from './print-image.mjs';
 import { choosePrinterName } from './print-destination.mjs';
@@ -216,6 +217,8 @@ async function capturePhoto(outputDir) {
   const filename = `capture-${Date.now()}.jpg`;
   const filepath = path.join(outputDir, filename);
 
+  await waitForCameraReady({ probe: () => gphoto2('--get-config capturetarget', { timeout: 5000 }) });
+
   // Keep the photo in camera RAM and download in the same gphoto2 session.
   // Use the choice label so this does not depend on camera-specific indices.
   const output = gphoto2(`--set-config-value capturetarget="Internal RAM" --capture-image-and-download --filename "${filepath}"`, { timeout: 60000 });
@@ -337,7 +340,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && pathname === '/preview') {
-      if (focusController.busy || captureInProgress) return json(res, 409, { success: false, error: 'Kamera sedang digunakan' }, allowedOrigin);
+      if (focusController.busy || captureInProgress || liveViewProcess) return json(res, 409, { success: false, error: 'Kamera sedang digunakan' }, allowedOrigin);
       if (!isGphoto2Available()) {
         return json(res, 200, { available: false, error: 'gPhoto2 tidak tersedia' }, allowedOrigin);
       }
@@ -365,9 +368,15 @@ const server = http.createServer(async (req, res) => {
         filepath = await captureWithPausedLiveView({
           isLive: () => !!liveViewProcess,
           stop: stopLiveView,
-          capture: () => capturePhoto(outputDir),
+          capture: async () => {
+            try { return await capturePhoto(outputDir); }
+            finally { await new Promise(resolve => setTimeout(resolve, 750)); }
+          },
           start: () => { captureInProgress = false; if (liveViewWanted) startLiveView(); },
         });
+      } catch (error) {
+        console.error('[dslr-agent] Capture gagal:', error);
+        throw error;
       } finally {
         captureInProgress = false;
       }
